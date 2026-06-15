@@ -18,18 +18,28 @@ _run() {
   esac
 }
 
+# signature of the target repo's tracked-file state — to detect write-leaks from draft models
+_repo_sig() { git -C "${FUSION_GUARD_REPO:-$PWD}" status --porcelain 2>/dev/null | shasum | awk '{print $1}'; }
+
 # fan <role> <promptfile> <run-dir> <model...>  — parallel, capture stdout + exit per model
 cmd_fan() {
   local role="$1" prompt="$2" dir="$3"; shift 3
   mkdir -p "$dir/$role" "${FUSION_SCRATCH:-/tmp/fusion-scratch}"
-  local m
+  local sig_before sig_after leak=false m
+  sig_before="$(_repo_sig)"   # write-isolation guard: snapshot target repo before fan
   for m in "$@"; do
     ( timeout "$TIMEOUT" bash "$0" _run "$m" "$prompt" \
         >"$dir/$role/$m.md" 2>"$dir/$role/$m.err"
       echo "$?" >"$dir/$role/$m.exit" ) &
   done
   wait
-  _status "$dir" "$role" "$@"
+  sig_after="$(_repo_sig)"
+  if [ "$sig_before" != "$sig_after" ]; then
+    leak=true
+    echo "WRITE-LEAK: target repo mutated during fan — a draft model wrote tracked files" >&2
+  fi
+  _status "$dir" "$role" "$leak" "$@"
+  [ "$leak" = true ] && return 3 || return 0
 }
 
 # cross-verify <verifier> <target-plan-file> <run-dir> — idiot-test one plan with one model
@@ -39,9 +49,12 @@ cmd_cross_verify() {
   local base; base="$(basename "$target" .md)"
   local pf="$dir/cross/prompt-$verifier-on-$base.txt"
   {
-    echo "Ты — кросс-верификатор. Автор плана ниже НЕКОМПЕТЕНТЕН: перепроверь ИНСТРУМЕНТАЛЬНО каждое"
-    echo "утверждение, источник, довод, вывод (grep/read/контрпример, а не «перечитал и согласен»)."
-    echo "Выдай [BLOCKER/MAJOR/MINOR]+суть+пруф. В конце: ship/revise/rethink. --- ПЛАН: ---"
+    echo "Ты — кросс-верификатор. Автор плана ниже НЕКОМПЕТЕНТЕН: перепроверь ИНСТРУМЕНТАЛЬНО"
+    echo "(grep/read/контрпример, не «перечитал и согласен»). Оси проверки:"
+    echo "correctness · completeness · assumptions · contradictions · missed-risks."
+    echo "Формат КАЖДОЙ находки ровно: [BLOCKER|MAJOR|MINOR] <axis> @<секция> — <суть> — <пруф>."
+    echo "Последняя строка ровно: VERDICT: verified|issues-found|blocked (blockers=<N>)."
+    echo "--- ПЛАН: ---"
     cat "$target"
   } >"$pf"
   ( timeout "$TIMEOUT" bash "$0" _run "$verifier" "$pf" \
@@ -73,9 +86,9 @@ cmd_cleanup() {
 
 # _status <dir> <role> <model...> — write status.json with exit codes
 _status() {
-  local dir="$1" role="$2"; shift 2
+  local dir="$1" role="$2" leak="${3:-false}"; shift 3
   local sf="$dir/status.json" m ex st first=1
-  { printf '{"run_dir":"%s","role":"%s","participants":{' "$dir" "$role"
+  { printf '{"run_dir":"%s","role":"%s","write_leak":%s,"participants":{' "$dir" "$role" "$leak"
     for m in "$@"; do
       ex="$(cat "$dir/$role/$m.exit" 2>/dev/null || echo 99)"
       case "$ex" in 0) st=ok ;; 124) st=timeout ;; *) st=error ;; esac
