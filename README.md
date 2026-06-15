@@ -1,5 +1,8 @@
 # fusion
 
+[![CI](https://github.com/malakhov-dmitrii/fusion/actions/workflows/ci.yml/badge.svg)](https://github.com/malakhov-dmitrii/fusion/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 **A multi-model consensus planner for coding agents.** Claude, Codex, and DeepSeek (or any models you reach through [opencode](https://opencode.ai) — GLM, Kimi, MiniMax…) each draft a plan **independently**, cross-verify one another ("idiot-test"), and **must reach consensus** before a single plan is emitted. The output is a plan — fusion never touches your code.
 
 > **Status: v0.1, experimental.** The harness (`fan` / `cross-verify` / `collect` / `cleanup`) is verified working across Claude, Codex, and opencode (incl. an opencode-only roster of GLM + Kimi + DeepSeek), and the full `/fusion` cycle runs end-to-end. It's young — flags and ergonomics will change — but the core mechanism is the point, not a finished product.
@@ -42,7 +45,7 @@ See a real run in [`examples/selftest-plan.md`](examples/selftest-plan.md).
 ## Quickstart
 
 ```bash
-git clone <this-repo> fusion && cd fusion
+git clone https://github.com/malakhov-dmitrii/fusion fusion && cd fusion
 ./install.sh                 # detects Claude Code / Codex, links the skill
 # authenticate the providers in your roster (below), then:
 /fusion <task> --dir <path-to-your-repo>
@@ -52,7 +55,7 @@ git clone <this-repo> fusion && cd fusion
 
 Point your agent at this and it can install fusion itself:
 
-> Clone `<repo-url>`, run `./install.sh` from the repo root, then read `README.md` →
+> Clone `https://github.com/malakhov-dmitrii/fusion`, run `./install.sh` from the repo root, then read `README.md` →
 > "Providers & auth" and make sure the CLIs for my chosen roster are authenticated.
 > Default roster is `claude codex deepseek`. Confirm `/fusion` is available and report back.
 
