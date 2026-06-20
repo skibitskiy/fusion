@@ -19,19 +19,30 @@ SCRATCH="${FUSION_SCRATCH:-/tmp/fusion-scratch}"
 
 _slug() { printf '%s' "$1" | tr '/:' '__'; }   # participant -> safe filename
 
-# _run <participant> <promptfile>  — dispatch one model call, answer to stdout
+# _run <participant> <promptfile>  — dispatch one model call, answer to stdout.
+# Δ2 isolation (corrected): a drafter NEEDS live repo read-access to go read the code it
+# wants — the brief can't pre-include everything. So every participant runs WITH the repo as
+# its working dir (claude/codex inherit cwd=repo; opencode gets --dir "$repo"). Isolation is
+# achieved instead by keeping run ARTIFACTS OUT of the repo working tree (the orchestrator
+# sets RUN to an out-of-repo private root, e.g. ~/.fusion/runs/$TS): a participant browsing
+# the repo sees all the code but NO run's drafts — not its own (blind-first) and not a
+# concurrent sibling fusion's (no cross-run echo as fake corroboration). NOTE: this removes
+# the accidental-exploration vector; a model already holding an absolute path to a sibling
+# run could still read it. Hard guarantee = sandbox-exec/containers (deferred).
 _run() {
   local participant="$1" pfile="$2"
   local kind="${participant%%:*}" model=""
   [ "$participant" != "$kind" ] && model="${participant#*:}"
+  local prompt; prompt="$(cat "$pfile")"
+  local repo="${FUSION_GUARD_REPO:-$PWD}"
   case "$kind" in
-    claude)   claude -p ${model:+--model "$model"} "$(cat "$pfile")" ;;
-    codex)    codex exec --sandbox read-only "$(cat "$pfile")" ;;
-    deepseek) opencode run --pure --dir "$SCRATCH" \
-                -m "${FUSION_MODEL_DEEPSEEK:-opencode-go/deepseek-v4-pro}" "$(cat "$pfile")" ;;
+    claude)   claude -p ${FUSION_CLAUDE_EFFORT:+--effort "$FUSION_CLAUDE_EFFORT"} ${model:+--model "$model"} "$prompt" </dev/null ;;
+    codex)    codex exec --sandbox read-only --skip-git-repo-check "$prompt" </dev/null ;;
+    deepseek) opencode run --dir "$repo" \
+                -m "${FUSION_MODEL_DEEPSEEK:-opencode-go/deepseek-v4-pro}" "$prompt" </dev/null ;;
     opencode|oc)
               [ -n "$model" ] || { echo "opencode participant needs a model: opencode:<model>" >&2; return 98; }
-              opencode run --pure --dir "$SCRATCH" -m "$model" "$(cat "$pfile")" ;;
+              opencode run --dir "$repo" -m "$model" "$prompt" </dev/null ;;
     *) echo "unknown participant kind: $kind" >&2; return 99 ;;
   esac
 }
@@ -52,6 +63,16 @@ cmd_fan() {
       echo "$?" >"$dir/$role/$slug.exit" ) &
   done
   wait
+  # Δ2 seal-before-share: the instant the round ends, freeze each draft (read-only + a shasum
+  # manifest) BEFORE any later stage can show it to another participant — a tamper-evident
+  # record that no draft was revised after glimpsing a sibling's.
+  : >"$dir/$role/SEALED.manifest"
+  for p in "$@"; do
+    slug="$(_slug "$p")"
+    [ -f "$dir/$role/$slug.md" ] || continue
+    shasum "$dir/$role/$slug.md" >>"$dir/$role/SEALED.manifest" 2>/dev/null || true
+    chmod a-w "$dir/$role/$slug.md" 2>/dev/null || true
+  done
   sig_after="$(_repo_sig)"
   if [ "$sig_before" != "$sig_after" ]; then
     leak=true
@@ -84,8 +105,11 @@ cmd_cross_verify() {
 
 # collect <run-dir> — concat artifacts into aggregate.md
 cmd_collect() {
-  local dir="$1" out="$1/aggregate.md" f
-  { echo "# Aggregate — $dir"; echo
+  local dir="$1" out="$1/aggregate.md" f n
+  n="$(ls "$dir"/*/*.md 2>/dev/null | wc -l | tr -d ' ')"
+  { echo "# Aggregate — $dir"
+    echo "coverage: $n artifact(s) included$([ -f "$dir/status.json" ] && printf ' · status.json: %s' "$(grep -o '"coverage":{[^}]*}' "$dir/status.json" 2>/dev/null)")"
+    echo
     for f in "$dir"/*/*.md; do
       [ -f "$f" ] || continue
       echo "## $f"; echo '```'; cat "$f"; echo '```'; echo
@@ -163,18 +187,24 @@ USAGE
 }
 
 # _status <dir> <role> <leak> <participant...>
+# Coverage-denominator discipline: status.json carries a `coverage` block so no consumer can
+# read "ok" without "requested". `degraded` is computed mechanically (ok<2 families = not a
+# real fusion). A bare ok-count is never quotable; it always travels with its denominator.
 _status() {
   local dir="$1" role="$2" leak="${3:-false}"; shift 3
   local sf="$dir/status.json" p slug ex st first=1
+  local requested=$# ok=0 timeout=0 error=0 degraded
   { printf '{"run_dir":"%s","role":"%s","write_leak":%s,"participants":{' "$dir" "$role" "$leak"
     for p in "$@"; do
       slug="$(_slug "$p")"
       ex="$(cat "$dir/$role/$slug.exit" 2>/dev/null || echo 99)"
-      case "$ex" in 0) st=ok ;; 124) st=timeout ;; *) st=error ;; esac
+      case "$ex" in 0) st=ok; ok=$((ok+1)) ;; 124) st=timeout; timeout=$((timeout+1)) ;; *) st=error; error=$((error+1)) ;; esac
       [ $first -eq 1 ] || printf ','; first=0
       printf '"%s":{"exit":%s,"status":"%s"}' "$p" "$ex" "$st"
     done
-    printf '}}'
+    [ "$ok" -lt 2 ] && degraded=true || degraded=false
+    printf '},"coverage":{"requested":%d,"ok":%d,"timeout":%d,"error":%d,"degraded":%s}}' \
+      "$requested" "$ok" "$timeout" "$error" "$degraded"
   } >"$sf"
   cat "$sf"
 }
